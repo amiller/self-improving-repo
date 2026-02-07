@@ -69,16 +69,29 @@ jobs:
           # Build prompt
           PROMPT="Review this PR.\n\nRules:\n${RULES}\n\nTitle: ${TITLE}\n\nDescription: ${BODY}\n\nDiff:\n${DIFF}\n\nRespond with JSON: {\"decision\": \"APPROVE or REQUEST_CHANGES or COMMENT\", \"summary\": \"one line\", \"details\": \"review details\"}"
 
-          # Use jq to properly escape and build JSON payload
-          RESPONSE=$(jq -n --arg content "$PROMPT" '{
+          # Build JSON payload with jq
+          jq -n --arg content "$PROMPT" '{
             "model": "claude-sonnet-4-20250514",
             "max_tokens": 1024,
             "messages": [{"role": "user", "content": $content}]
-          }' | curl -s https://api.anthropic.com/v1/messages \
+          }' > /tmp/payload.json
+
+          # Verify JSON is valid
+          if ! jq empty /tmp/payload.json 2>/dev/null; then
+            echo "Invalid JSON in payload"
+            exit 1
+          fi
+
+          # Debug: check API key length
+          echo "API key length: ${#ANTHROPIC_API_KEY}"
+          echo "Payload file size: $(stat -c%s /tmp/payload.json)"
+
+          # Send to API using file
+          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
             -H "Content-Type: application/json" \
             -H "x-api-key: ${ANTHROPIC_API_KEY}" \
             -H "anthropic-version: 2023-06-01" \
-            -d @-)
+            -d @/tmp/payload.json)
 
           REVIEW=$(echo "$RESPONSE" | jq -r '.content[0].text // empty')
           if [ -z "$REVIEW" ]; then
