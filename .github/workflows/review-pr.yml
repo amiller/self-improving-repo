@@ -3,6 +3,9 @@ name: Claude PR Review
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+  push:
+    branches-ignore:
+      - main
 
 permissions:
   contents: write
@@ -16,15 +19,34 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Find PR number
+        id: findpr
+        run: |
+          if [ -n "${{ github.event.pull_request.number }}" ]; then
+            echo "pr_number=${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
+          else
+            PR_NUMBER=$(gh pr list --head "${{ github.ref_name }}" --json number -q '.[0].number')
+            if [ -z "$PR_NUMBER" ]; then
+              echo "No PR found for this branch, skipping"
+              echo "skip=true" >> $GITHUB_OUTPUT
+            else
+              echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+            fi
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Get PR diff
+        if: steps.findpr.outputs.skip != 'true'
         id: diff
         run: |
-          gh pr diff ${{ github.event.pull_request.number }} > /tmp/diff.txt
+          gh pr diff ${{ steps.findpr.outputs.pr_number }} > /tmp/diff.txt
           echo "diff_size=$(wc -c < /tmp/diff.txt)" >> $GITHUB_OUTPUT
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Load review rules
+        if: steps.findpr.outputs.skip != 'true'
         id: rules
         run: |
           if [ -f "CLAUDE_RULES.md" ]; then
@@ -34,12 +56,14 @@ jobs:
           fi
 
       - name: Claude reviews PR
+        if: steps.findpr.outputs.skip != 'true'
         id: review
         run: |
           DIFF=$(cat /tmp/diff.txt | head -c 50000)  # Truncate huge diffs
           RULES=$(cat /tmp/rules.txt)
-          TITLE="${{ github.event.pull_request.title }}"
-          BODY="${{ github.event.pull_request.body }}"
+          PR_DATA=$(gh pr view ${{ steps.findpr.outputs.pr_number }} --json title,body)
+          TITLE=$(echo "$PR_DATA" | jq -r '.title')
+          BODY=$(echo "$PR_DATA" | jq -r '.body')
 
           # Build the prompt
           PROMPT=$(cat <<'PROMPT_EOF'
@@ -91,8 +115,11 @@ jobs:
 
           # Save details for comment
           echo "$DETAILS" > /tmp/review_details.txt
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Post review comment
+        if: steps.findpr.outputs.skip != 'true'
         run: |
           DECISION="${{ steps.review.outputs.decision }}"
           SUMMARY="${{ steps.review.outputs.summary }}"
@@ -105,7 +132,7 @@ jobs:
             *) EVENT="COMMENT" ;;
           esac
 
-          gh pr review ${{ github.event.pull_request.number }} \
+          gh pr review ${{ steps.findpr.outputs.pr_number }} \
             --event "$EVENT" \
             --body "## 🤖 Claude Review
 
@@ -121,13 +148,13 @@ $DETAILS
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Auto-merge if approved and allowed
-        if: steps.review.outputs.decision == 'APPROVE'
+        if: steps.findpr.outputs.skip != 'true' && steps.review.outputs.decision == 'APPROVE'
         run: |
           # Only auto-merge if PR has the 'auto-merge' label
-          LABELS=$(gh pr view ${{ github.event.pull_request.number }} --json labels -q '.labels[].name')
+          LABELS=$(gh pr view ${{ steps.findpr.outputs.pr_number }} --json labels -q '.labels[].name')
           if echo "$LABELS" | grep -q "auto-merge"; then
             echo "Auto-merge label found, merging..."
-            gh pr merge ${{ github.event.pull_request.number }} --squash --auto
+            gh pr merge ${{ steps.findpr.outputs.pr_number }} --squash --auto
           else
             echo "No auto-merge label, skipping automatic merge"
           fi
