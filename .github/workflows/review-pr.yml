@@ -164,7 +164,9 @@ jobs:
             "REQUEST_CHANGES") FLAG="--request-changes" ;;
             *) FLAG="--comment" ;;
           esac
-          gh pr review ${{ steps.findpr.outputs.pr_number }} $FLAG --body-file /tmp/review_body.txt
+          # Try to post review, fall back to comment if it's own PR
+          gh pr review ${{ steps.findpr.outputs.pr_number }} $FLAG --body-file /tmp/review_body.txt || \
+            gh pr comment ${{ steps.findpr.outputs.pr_number }} --body-file /tmp/review_body.txt
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
