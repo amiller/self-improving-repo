@@ -136,11 +136,11 @@ jobs:
         run: |
           DECISION="${{ steps.review.outputs.decision }}"
           case "$DECISION" in
-            "APPROVE") EVENT="APPROVE" ;;
-            "REQUEST_CHANGES") EVENT="REQUEST_CHANGES" ;;
-            *) EVENT="COMMENT" ;;
+            "APPROVE") FLAG="--approve" ;;
+            "REQUEST_CHANGES") FLAG="--request-changes" ;;
+            *) FLAG="--comment" ;;
           esac
-          gh pr review ${{ steps.findpr.outputs.pr_number }} --event "$EVENT" --body-file /tmp/review_body.txt
+          gh pr review ${{ steps.findpr.outputs.pr_number }} $FLAG --body-file /tmp/review_body.txt
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
