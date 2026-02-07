@@ -76,11 +76,14 @@ jobs:
             "messages": [{"role": "user", "content": $content}]
           }' > /tmp/payload.json
 
+          echo "Payload size: $(wc -c < /tmp/payload.json) bytes"
+          echo "Payload first 200 chars: $(head -c 200 /tmp/payload.json)"
+
           RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
             -H "Content-Type: application/json" \
             -H "x-api-key: ${ANTHROPIC_API_KEY}" \
             -H "anthropic-version: 2023-06-01" \
-            -d @/tmp/payload.json)
+            --data-binary @/tmp/payload.json)
 
           REVIEW=$(echo "$RESPONSE" | jq -r '.content[0].text // empty')
           if [ -z "$REVIEW" ]; then
