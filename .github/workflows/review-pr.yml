@@ -41,13 +41,11 @@ jobs:
         id: diff
         run: |
           gh pr diff ${{ steps.findpr.outputs.pr_number }} > /tmp/diff.txt
-          echo "diff_size=$(wc -c < /tmp/diff.txt)" >> $GITHUB_OUTPUT
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Load review rules
         if: steps.findpr.outputs.skip != 'true'
-        id: rules
         run: |
           if [ -f "CLAUDE_RULES.md" ]; then
             cat CLAUDE_RULES.md > /tmp/rules.txt
@@ -59,62 +57,48 @@ jobs:
         if: steps.findpr.outputs.skip != 'true'
         id: review
         run: |
-          DIFF=$(cat /tmp/diff.txt | head -c 50000)  # Truncate huge diffs
+          DIFF=$(cat /tmp/diff.txt | head -c 50000)
           RULES=$(cat /tmp/rules.txt)
           PR_DATA=$(gh pr view ${{ steps.findpr.outputs.pr_number }} --json title,body)
           TITLE=$(echo "$PR_DATA" | jq -r '.title')
           BODY=$(echo "$PR_DATA" | jq -r '.body')
 
-          # Build the prompt
-          PROMPT=$(cat <<'PROMPT_EOF'
-          You are reviewing a pull request. Based on the diff and any rules provided, decide:
-          1. APPROVE - if the changes are good
-          2. REQUEST_CHANGES - if there are issues that must be fixed
-          3. COMMENT - if you have suggestions but it's okay to merge
-
-          Respond in this exact JSON format:
-          {"decision": "APPROVE|REQUEST_CHANGES|COMMENT", "summary": "one line summary", "details": "detailed review"}
-
-          Be concise. Focus on correctness, security, and whether the change does what it claims.
-          PROMPT_EOF
-          )
-
-          # Call Claude API
           RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
             -H "Content-Type: application/json" \
             -H "x-api-key: ${{ secrets.ANTHROPIC_API_KEY }}" \
             -H "anthropic-version: 2023-06-01" \
-            -d @- <<EOF
+            -d @- <<APICALL
           {
             "model": "claude-sonnet-4-20250514",
             "max_tokens": 1024,
             "messages": [{
               "role": "user",
-              "content": "# Review Rules\n${RULES}\n\n# PR Title\n${TITLE}\n\n# PR Description\n${BODY}\n\n# Diff\n\`\`\`diff\n${DIFF}\n\`\`\`\n\n${PROMPT}"
+              "content": "Review this PR. Rules: ${RULES}\n\nTitle: ${TITLE}\n\nDescription: ${BODY}\n\nDiff:\n${DIFF}\n\nRespond with JSON: {\"decision\": \"APPROVE or REQUEST_CHANGES or COMMENT\", \"summary\": \"one line\", \"details\": \"review details\"}"
             }]
           }
-          EOF
+          APICALL
           )
 
-          # Extract the text content
           REVIEW=$(echo "$RESPONSE" | jq -r '.content[0].text // empty')
-
           if [ -z "$REVIEW" ]; then
-            echo "Error: No review generated"
-            echo "$RESPONSE" | jq .
+            echo "Error: $RESPONSE"
             exit 1
           fi
 
-          # Parse decision
           DECISION=$(echo "$REVIEW" | jq -r '.decision // "COMMENT"')
           SUMMARY=$(echo "$REVIEW" | jq -r '.summary // "Review complete"')
           DETAILS=$(echo "$REVIEW" | jq -r '.details // "No details"')
 
           echo "decision=$DECISION" >> $GITHUB_OUTPUT
-          echo "summary=$SUMMARY" >> $GITHUB_OUTPUT
 
-          # Save details for comment
-          echo "$DETAILS" > /tmp/review_details.txt
+          # Write review body to file to avoid YAML escaping issues
+          echo "## Claude Review" > /tmp/review_body.txt
+          echo "" >> /tmp/review_body.txt
+          echo "Decision: $DECISION" >> /tmp/review_body.txt
+          echo "Summary: $SUMMARY" >> /tmp/review_body.txt
+          echo "" >> /tmp/review_body.txt
+          echo "### Details" >> /tmp/review_body.txt
+          echo "$DETAILS" >> /tmp/review_body.txt
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -122,41 +106,21 @@ jobs:
         if: steps.findpr.outputs.skip != 'true'
         run: |
           DECISION="${{ steps.review.outputs.decision }}"
-          SUMMARY="${{ steps.review.outputs.summary }}"
-          DETAILS=$(cat /tmp/review_details.txt)
-
-          # Map decision to GitHub review event
           case "$DECISION" in
             "APPROVE") EVENT="APPROVE" ;;
             "REQUEST_CHANGES") EVENT="REQUEST_CHANGES" ;;
             *) EVENT="COMMENT" ;;
           esac
-
-          gh pr review ${{ steps.findpr.outputs.pr_number }} \
-            --event "$EVENT" \
-            --body "## 🤖 Claude Review
-
-**Decision:** $DECISION
-**Summary:** $SUMMARY
-
-### Details
-$DETAILS
-
----
-*Automated review by Claude. Override with \`/lgtm\` comment if you disagree.*"
+          gh pr review ${{ steps.findpr.outputs.pr_number }} --event "$EVENT" --body-file /tmp/review_body.txt
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Auto-merge if approved and allowed
+      - name: Auto-merge if approved
         if: steps.findpr.outputs.skip != 'true' && steps.review.outputs.decision == 'APPROVE'
         run: |
-          # Only auto-merge if PR has the 'auto-merge' label
           LABELS=$(gh pr view ${{ steps.findpr.outputs.pr_number }} --json labels -q '.labels[].name')
           if echo "$LABELS" | grep -q "auto-merge"; then
-            echo "Auto-merge label found, merging..."
             gh pr merge ${{ steps.findpr.outputs.pr_number }} --squash --auto
-          else
-            echo "No auto-merge label, skipping automatic merge"
           fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
