@@ -109,10 +109,25 @@ jobs:
           PYTHON_SCRIPT
 
           RESPONSE=$(cat /tmp/response.json)
+          echo "Raw response: $RESPONSE"
+
+          # Check if response is valid JSON
+          if ! echo "$RESPONSE" | jq empty 2>/dev/null; then
+            echo "Error: Response is not valid JSON"
+            echo "$RESPONSE"
+            exit 1
+          fi
+
+          # Check for error in response
+          if echo "$RESPONSE" | jq -e '.error' >/dev/null 2>&1; then
+            echo "API Error: $(echo "$RESPONSE" | jq -r '.error.message')"
+            exit 1
+          fi
 
           REVIEW=$(echo "$RESPONSE" | jq -r '.content[0].text // empty')
           if [ -z "$REVIEW" ]; then
-            echo "Error: $RESPONSE"
+            echo "Error: No review content in response"
+            echo "$RESPONSE" | jq .
             exit 1
           fi
 
