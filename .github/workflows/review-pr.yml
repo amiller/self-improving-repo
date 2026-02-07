@@ -69,14 +69,13 @@ jobs:
           # Build prompt
           PROMPT="Review this PR.\n\nRules:\n${RULES}\n\nTitle: ${TITLE}\n\nDescription: ${BODY}\n\nDiff:\n${DIFF}\n\nRespond with JSON: {\"decision\": \"APPROVE or REQUEST_CHANGES or COMMENT\", \"summary\": \"one line\", \"details\": \"review details\"}"
 
-          # First test with minimal payload to verify API works
-          echo '{"model":"claude-sonnet-4-20250514","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}' > /tmp/test.json
-          echo "Testing API with minimal payload..."
+          # First test with inline JSON
+          echo "Testing API with inline JSON..."
           TEST_RESP=$(curl -s https://api.anthropic.com/v1/messages \
             -H "Content-Type: application/json" \
             -H "x-api-key: ${ANTHROPIC_API_KEY}" \
             -H "anthropic-version: 2023-06-01" \
-            --data-binary "@/tmp/test.json")
+            -d '{"model":"claude-sonnet-4-20250514","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}')
           echo "Test response: $TEST_RESP"
 
           # Now build real payload
