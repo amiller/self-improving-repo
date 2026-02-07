@@ -8,7 +8,7 @@ on:
         required: false
         default: 'general code quality and documentation'
   schedule:
-    - cron: '0 0 * * 0'  # Weekly on Sunday midnight
+    - cron: '0 0 * * 0'
 
 permissions:
   contents: write
@@ -23,9 +23,8 @@ jobs:
       - name: Gather codebase context
         run: |
           echo "# Repository Structure" > /tmp/context.txt
-          find . -type f \( -name "*.py" -o -name "*.js" -o -name "*.ts" -o -name "*.yml" -o -name "*.md" \) | grep -v node_modules | head -50 >> /tmp/context.txt
+          find . -type f \( -name "*.py" -o -name "*.js" -o -name "*.yml" -o -name "*.md" \) | grep -v node_modules | head -50 >> /tmp/context.txt
           echo "" >> /tmp/context.txt
-
           for f in README.md CLAUDE_RULES.md; do
             if [ -f "$f" ]; then
               echo "# $f" >> /tmp/context.txt
@@ -33,7 +32,6 @@ jobs:
               echo "" >> /tmp/context.txt
             fi
           done
-
           echo "# Recent Commits" >> /tmp/context.txt
           git log --oneline -10 >> /tmp/context.txt
 
@@ -41,86 +39,34 @@ jobs:
         id: suggest
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          FOCUS: ${{ github.event.inputs.focus || 'general code quality' }}
         run: |
           CONTEXT=$(cat /tmp/context.txt | head -c 20000)
-          FOCUS="${{ github.event.inputs.focus || 'general code quality' }}"
-
-          export PROMPT="You are a developer improving this repository. Focus: ${FOCUS}
-
-Context:
-${CONTEXT}
-
-Propose ONE small, specific improvement. Respond with ONLY valid JSON (no markdown):
-{\"title\": \"PR title\", \"description\": \"what and why\", \"files\": [{\"path\": \"path/to/file\", \"content\": \"full file content\"}]}
-
-Keep changes minimal. Only modify existing files or add small new ones."
-
-          python3 << 'PYTHON_SCRIPT'
-import json
-import urllib.request
-import os
-
-prompt = os.environ.get('PROMPT', '')
-api_key = os.environ.get('ANTHROPIC_API_KEY', '')
-
-payload = {
-    "model": "claude-sonnet-4-20250514",
-    "max_tokens": 4096,
-    "messages": [{"role": "user", "content": prompt}]
-}
-
-data = json.dumps(payload).encode('utf-8')
-
-req = urllib.request.Request(
-    'https://api.anthropic.com/v1/messages',
-    data=data,
-    headers={
-        'Content-Type': 'application/json',
-        'x-api-key': api_key.strip(),
-        'anthropic-version': '2023-06-01'
-    }
-)
-
-try:
-    with urllib.request.urlopen(req) as resp:
-        result = json.loads(resp.read())
-        with open('/tmp/response.json', 'w') as f:
-            json.dump(result, f)
-except urllib.error.HTTPError as e:
-    error_body = e.read().decode()
-    print(f"Error: {error_body}")
-    with open('/tmp/response.json', 'w') as f:
-        f.write(error_body)
-PYTHON_SCRIPT
-
+          PROMPT="Focus: ${FOCUS}. Context: ${CONTEXT}. Propose ONE small improvement. Respond with ONLY JSON: {\"title\": \"PR title\", \"description\": \"why\", \"files\": [{\"path\": \"file\", \"content\": \"content\"}]}"
+          export PROMPT
+          python3 -c '
+          import json, urllib.request, os
+          prompt = os.environ.get("PROMPT", "")
+          api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+          payload = {"model": "claude-sonnet-4-20250514", "max_tokens": 4096, "messages": [{"role": "user", "content": prompt}]}
+          req = urllib.request.Request("https://api.anthropic.com/v1/messages", json.dumps(payload).encode(), {"Content-Type": "application/json", "x-api-key": api_key.strip(), "anthropic-version": "2023-06-01"})
+          try:
+            with urllib.request.urlopen(req) as r:
+              json.dump(json.loads(r.read()), open("/tmp/response.json", "w"))
+          except urllib.error.HTTPError as e:
+            open("/tmp/response.json", "w").write(e.read().decode())
+          '
           RESPONSE=$(cat /tmp/response.json)
-          echo "Response received"
-
-          # Extract text content
           SUGGESTION=$(echo "$RESPONSE" | jq -r '.content[0].text // empty')
-
           if [ -z "$SUGGESTION" ]; then
-            echo "No suggestion generated"
-            echo "$RESPONSE" | jq .
-            exit 0
+            echo "No suggestion"; exit 0
           fi
-
-          # Claude may wrap JSON in markdown, extract it
           CLEAN_JSON=$(echo "$SUGGESTION" | sed -n '/^```json/,/^```$/p' | sed '1d;$d')
-          if [ -z "$CLEAN_JSON" ]; then
-            CLEAN_JSON="$SUGGESTION"
-          fi
-
+          [ -z "$CLEAN_JSON" ] && CLEAN_JSON="$SUGGESTION"
           echo "$CLEAN_JSON" > /tmp/suggestion.json
-
-          # Validate JSON
           if ! jq empty /tmp/suggestion.json 2>/dev/null; then
-            echo "Invalid JSON response:"
-            cat /tmp/suggestion.json
-            exit 0
+            echo "Invalid JSON"; cat /tmp/suggestion.json; exit 0
           fi
-
-          echo "Valid suggestion received"
           echo "has_suggestion=true" >> $GITHUB_OUTPUT
 
       - name: Create improvement PR
@@ -130,37 +76,22 @@ PYTHON_SCRIPT
         run: |
           TITLE=$(jq -r '.title' /tmp/suggestion.json)
           DESC=$(jq -r '.description' /tmp/suggestion.json)
-
-          echo "Creating PR: $TITLE"
-
-          # Create branch
           BRANCH="self-improve/$(date +%Y%m%d-%H%M%S)"
           git checkout -b "$BRANCH"
-
-          # Apply file changes
           jq -c '.files[]' /tmp/suggestion.json | while read -r file; do
             FILE_PATH=$(echo "$file" | jq -r '.path')
             CONTENT=$(echo "$file" | jq -r '.content')
-
-            echo "Writing: $FILE_PATH"
             mkdir -p "$(dirname "$FILE_PATH")"
             printf '%s' "$CONTENT" > "$FILE_PATH"
             git add "$FILE_PATH"
           done
-
-          # Commit and push
           git config user.name "Claude Bot"
           git config user.email "claude@anthropic.com"
           git commit -m "$TITLE" || { echo "Nothing to commit"; exit 0; }
           git push origin "$BRANCH"
+          gh pr create --title "$TITLE" --body "## Self-Improvement PR
 
-          # Create PR with auto-merge label
-          gh pr create \
-            --title "$TITLE" \
-            --body "## Self-Improvement PR
+          $DESC
 
-$DESC
-
----
-*This PR was automatically generated by Claude. It will be reviewed by the review-pr workflow.*" \
-            --label "auto-merge" || echo "PR creation failed, label may not exist"
+          ---
+          *Auto-generated by Claude.*" --label "auto-merge" || echo "PR creation may have failed"
