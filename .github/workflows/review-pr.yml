@@ -69,21 +69,16 @@ jobs:
           # Build prompt
           PROMPT="Review this PR.\n\nRules:\n${RULES}\n\nTitle: ${TITLE}\n\nDescription: ${BODY}\n\nDiff:\n${DIFF}\n\nRespond with JSON: {\"decision\": \"APPROVE or REQUEST_CHANGES or COMMENT\", \"summary\": \"one line\", \"details\": \"review details\"}"
 
-          # Use jq to properly escape and build JSON payload, write to file
-          jq -n --arg content "$PROMPT" '{
+          # Use jq to properly escape and build JSON payload
+          RESPONSE=$(jq -n --arg content "$PROMPT" '{
             "model": "claude-sonnet-4-20250514",
             "max_tokens": 1024,
             "messages": [{"role": "user", "content": $content}]
-          }' > /tmp/payload.json
-
-          echo "Payload size: $(wc -c < /tmp/payload.json) bytes"
-          echo "Payload first 200 chars: $(head -c 200 /tmp/payload.json)"
-
-          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
+          }' | curl -s https://api.anthropic.com/v1/messages \
             -H "Content-Type: application/json" \
             -H "x-api-key: ${ANTHROPIC_API_KEY}" \
             -H "anthropic-version: 2023-06-01" \
-            --data-binary @/tmp/payload.json)
+            -d @-)
 
           REVIEW=$(echo "$RESPONSE" | jq -r '.content[0].text // empty')
           if [ -z "$REVIEW" ]; then
