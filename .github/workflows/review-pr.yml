@@ -82,16 +82,19 @@ jobs:
             exit 1
           fi
 
-          # Debug: check API key length
+          # Debug
           echo "API key length: ${#ANTHROPIC_API_KEY}"
           echo "Payload file size: $(stat -c%s /tmp/payload.json)"
+          echo "First 10 bytes hex: $(head -c 10 /tmp/payload.json | xxd -p)"
+          echo "First 50 chars: $(head -c 50 /tmp/payload.json)"
 
-          # Send to API using file
+          # Try sending with --data-raw from variable
+          PAYLOAD=$(cat /tmp/payload.json)
           RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
             -H "Content-Type: application/json" \
             -H "x-api-key: ${ANTHROPIC_API_KEY}" \
             -H "anthropic-version: 2023-06-01" \
-            -d @/tmp/payload.json)
+            --data-raw "$PAYLOAD")
 
           REVIEW=$(echo "$RESPONSE" | jq -r '.content[0].text // empty')
           if [ -z "$REVIEW" ]; then
