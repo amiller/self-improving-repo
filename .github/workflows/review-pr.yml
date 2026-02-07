@@ -124,16 +124,25 @@ jobs:
             exit 1
           fi
 
-          REVIEW=$(echo "$RESPONSE" | jq -r '.content[0].text // empty')
-          if [ -z "$REVIEW" ]; then
+          REVIEW_TEXT=$(echo "$RESPONSE" | jq -r '.content[0].text // empty')
+          if [ -z "$REVIEW_TEXT" ]; then
             echo "Error: No review content in response"
             echo "$RESPONSE" | jq .
             exit 1
           fi
 
-          DECISION=$(echo "$REVIEW" | jq -r '.decision // "COMMENT"')
-          SUMMARY=$(echo "$REVIEW" | jq -r '.summary // "Review complete"')
-          DETAILS=$(echo "$REVIEW" | jq -r '.details // "No details"')
+          # Claude may wrap JSON in markdown code blocks, extract it
+          REVIEW_JSON=$(echo "$REVIEW_TEXT" | sed -n '/^```json/,/^```$/p' | sed '1d;$d')
+          if [ -z "$REVIEW_JSON" ]; then
+            # Try without code block
+            REVIEW_JSON="$REVIEW_TEXT"
+          fi
+
+          echo "Extracted JSON: $REVIEW_JSON"
+
+          DECISION=$(echo "$REVIEW_JSON" | jq -r '.decision // "COMMENT"')
+          SUMMARY=$(echo "$REVIEW_JSON" | jq -r '.summary // "Review complete"')
+          DETAILS=$(echo "$REVIEW_JSON" | jq -r '.details // "No details"')
 
           echo "decision=$DECISION" >> $GITHUB_OUTPUT
 
