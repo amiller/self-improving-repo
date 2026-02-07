@@ -22,68 +22,116 @@ jobs:
 
       - name: Gather codebase context
         run: |
-          # Create a summary of the codebase
           echo "# Repository Structure" > /tmp/context.txt
-          find . -type f -name "*.py" -o -name "*.js" -o -name "*.ts" -o -name "*.go" -o -name "*.rs" | head -50 >> /tmp/context.txt
+          find . -type f \( -name "*.py" -o -name "*.js" -o -name "*.ts" -o -name "*.yml" -o -name "*.md" \) | grep -v node_modules | head -50 >> /tmp/context.txt
           echo "" >> /tmp/context.txt
 
-          # Include key files
           for f in README.md CLAUDE_RULES.md; do
             if [ -f "$f" ]; then
               echo "# $f" >> /tmp/context.txt
-              cat "$f" >> /tmp/context.txt
+              head -100 "$f" >> /tmp/context.txt
               echo "" >> /tmp/context.txt
             fi
           done
 
-          # Recent commits
           echo "# Recent Commits" >> /tmp/context.txt
-          git log --oneline -20 >> /tmp/context.txt
+          git log --oneline -10 >> /tmp/context.txt
 
       - name: Claude suggests improvements
         id: suggest
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          CONTEXT=$(cat /tmp/context.txt | head -c 30000)
+          CONTEXT=$(cat /tmp/context.txt | head -c 20000)
           FOCUS="${{ github.event.inputs.focus || 'general code quality' }}"
 
-          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
-            -H "Content-Type: application/json" \
-            -H "x-api-key: ${{ secrets.ANTHROPIC_API_KEY }}" \
-            -H "anthropic-version: 2023-06-01" \
-            -d @- <<EOF
-          {
-            "model": "claude-sonnet-4-20250514",
-            "max_tokens": 4096,
-            "messages": [{
-              "role": "user",
-              "content": "You are a developer improving this repository. Focus: ${FOCUS}\n\nContext:\n${CONTEXT}\n\nPropose ONE small, specific improvement. Respond in JSON:\n{\"title\": \"PR title\", \"description\": \"what and why\", \"files\": [{\"path\": \"path/to/file\", \"content\": \"full file content\"}]}\n\nKeep changes minimal and focused. Only modify existing files or add small new ones."
-            }]
-          }
-          EOF
-          )
+          export PROMPT="You are a developer improving this repository. Focus: ${FOCUS}
 
+Context:
+${CONTEXT}
+
+Propose ONE small, specific improvement. Respond with ONLY valid JSON (no markdown):
+{\"title\": \"PR title\", \"description\": \"what and why\", \"files\": [{\"path\": \"path/to/file\", \"content\": \"full file content\"}]}
+
+Keep changes minimal. Only modify existing files or add small new ones."
+
+          python3 << 'PYTHON_SCRIPT'
+import json
+import urllib.request
+import os
+
+prompt = os.environ.get('PROMPT', '')
+api_key = os.environ.get('ANTHROPIC_API_KEY', '')
+
+payload = {
+    "model": "claude-sonnet-4-20250514",
+    "max_tokens": 4096,
+    "messages": [{"role": "user", "content": prompt}]
+}
+
+data = json.dumps(payload).encode('utf-8')
+
+req = urllib.request.Request(
+    'https://api.anthropic.com/v1/messages',
+    data=data,
+    headers={
+        'Content-Type': 'application/json',
+        'x-api-key': api_key.strip(),
+        'anthropic-version': '2023-06-01'
+    }
+)
+
+try:
+    with urllib.request.urlopen(req) as resp:
+        result = json.loads(resp.read())
+        with open('/tmp/response.json', 'w') as f:
+            json.dump(result, f)
+except urllib.error.HTTPError as e:
+    error_body = e.read().decode()
+    print(f"Error: {error_body}")
+    with open('/tmp/response.json', 'w') as f:
+        f.write(error_body)
+PYTHON_SCRIPT
+
+          RESPONSE=$(cat /tmp/response.json)
+          echo "Response received"
+
+          # Extract text content
           SUGGESTION=$(echo "$RESPONSE" | jq -r '.content[0].text // empty')
 
           if [ -z "$SUGGESTION" ]; then
             echo "No suggestion generated"
+            echo "$RESPONSE" | jq .
             exit 0
           fi
 
-          echo "$SUGGESTION" > /tmp/suggestion.json
+          # Claude may wrap JSON in markdown, extract it
+          CLEAN_JSON=$(echo "$SUGGESTION" | sed -n '/^```json/,/^```$/p' | sed '1d;$d')
+          if [ -z "$CLEAN_JSON" ]; then
+            CLEAN_JSON="$SUGGESTION"
+          fi
 
-          # Validate it's proper JSON
-          if ! jq . /tmp/suggestion.json > /dev/null 2>&1; then
-            echo "Invalid JSON response, skipping"
+          echo "$CLEAN_JSON" > /tmp/suggestion.json
+
+          # Validate JSON
+          if ! jq empty /tmp/suggestion.json 2>/dev/null; then
+            echo "Invalid JSON response:"
+            cat /tmp/suggestion.json
             exit 0
           fi
 
+          echo "Valid suggestion received"
           echo "has_suggestion=true" >> $GITHUB_OUTPUT
 
       - name: Create improvement PR
         if: steps.suggest.outputs.has_suggestion == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TITLE=$(jq -r '.title' /tmp/suggestion.json)
           DESC=$(jq -r '.description' /tmp/suggestion.json)
+
+          echo "Creating PR: $TITLE"
 
           # Create branch
           BRANCH="self-improve/$(date +%Y%m%d-%H%M%S)"
@@ -91,31 +139,28 @@ jobs:
 
           # Apply file changes
           jq -c '.files[]' /tmp/suggestion.json | while read -r file; do
-            PATH_=$(echo "$file" | jq -r '.path')
+            FILE_PATH=$(echo "$file" | jq -r '.path')
             CONTENT=$(echo "$file" | jq -r '.content')
 
-            mkdir -p "$(dirname "$PATH_")"
-            echo "$CONTENT" > "$PATH_"
-            git add "$PATH_"
+            echo "Writing: $FILE_PATH"
+            mkdir -p "$(dirname "$FILE_PATH")"
+            printf '%s' "$CONTENT" > "$FILE_PATH"
+            git add "$FILE_PATH"
           done
 
           # Commit and push
           git config user.name "Claude Bot"
           git config user.email "claude@anthropic.com"
-          git commit -m "$TITLE" || exit 0
+          git commit -m "$TITLE" || { echo "Nothing to commit"; exit 0; }
           git push origin "$BRANCH"
 
           # Create PR with auto-merge label
           gh pr create \
             --title "$TITLE" \
-            --body "## 🤖 Self-Improvement PR
+            --body "## Self-Improvement PR
 
 $DESC
 
 ---
-*This PR was automatically generated by Claude. It will be reviewed by the review-pr workflow.*
-
-If approved, it will auto-merge." \
-            --label "auto-merge"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+*This PR was automatically generated by Claude. It will be reviewed by the review-pr workflow.*" \
+            --label "auto-merge" || echo "PR creation failed, label may not exist"
