@@ -82,12 +82,17 @@ jobs:
             exit 1
           fi
 
-          # Send request with stdin redirection
-          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
+          # Write curl command to script and execute
+          cat > /tmp/call_api.sh << 'SCRIPT'
+          #!/bin/bash
+          curl -s https://api.anthropic.com/v1/messages \
             -H "Content-Type: application/json" \
-            -H "x-api-key: ${ANTHROPIC_API_KEY}" \
+            -H "x-api-key: $1" \
             -H "anthropic-version: 2023-06-01" \
-            -d @- < /tmp/payload.json)
+            --data-binary @/tmp/payload.json
+          SCRIPT
+          chmod +x /tmp/call_api.sh
+          RESPONSE=$(/tmp/call_api.sh "${ANTHROPIC_API_KEY}")
 
           REVIEW=$(echo "$RESPONSE" | jq -r '.content[0].text // empty')
           if [ -z "$REVIEW" ]; then
