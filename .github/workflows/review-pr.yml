@@ -61,23 +61,23 @@ jobs:
           RULES=$(cat /tmp/rules.txt)
           PR_DATA=$(gh pr view ${{ steps.findpr.outputs.pr_number }} --json title,body)
           TITLE=$(echo "$PR_DATA" | jq -r '.title')
-          BODY=$(echo "$PR_DATA" | jq -r '.body')
+          BODY=$(echo "$PR_DATA" | jq -r '.body // ""')
+
+          # Build prompt and escape for JSON
+          PROMPT="Review this PR.\n\nRules: ${RULES}\n\nTitle: ${TITLE}\n\nDescription: ${BODY}\n\nDiff:\n${DIFF}\n\nRespond with JSON: {\"decision\": \"APPROVE or REQUEST_CHANGES or COMMENT\", \"summary\": \"one line\", \"details\": \"review details\"}"
+
+          # Use jq to properly escape and build JSON payload
+          PAYLOAD=$(jq -n --arg content "$PROMPT" '{
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": $content}]
+          }')
 
           RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
             -H "Content-Type: application/json" \
             -H "x-api-key: ${{ secrets.ANTHROPIC_API_KEY }}" \
             -H "anthropic-version: 2023-06-01" \
-            -d @- <<APICALL
-          {
-            "model": "claude-sonnet-4-20250514",
-            "max_tokens": 1024,
-            "messages": [{
-              "role": "user",
-              "content": "Review this PR. Rules: ${RULES}\n\nTitle: ${TITLE}\n\nDescription: ${BODY}\n\nDiff:\n${DIFF}\n\nRespond with JSON: {\"decision\": \"APPROVE or REQUEST_CHANGES or COMMENT\", \"summary\": \"one line\", \"details\": \"review details\"}"
-            }]
-          }
-          APICALL
-          )
+            -d "$PAYLOAD")
 
           REVIEW=$(echo "$RESPONSE" | jq -r '.content[0].text // empty')
           if [ -z "$REVIEW" ]; then
